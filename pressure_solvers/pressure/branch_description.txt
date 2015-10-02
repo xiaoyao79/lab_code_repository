@@ -1,0 +1,31 @@
+Description of branches as of 6/12/2010 (John Charonko).
+
+
+trunk 				- current development focus, omni directional line integration without periodic assumption in time.   If you don't know what to use, choose this.
+
+
+
+
+Up-to-date snapshots featuring different solvers:
+------------------------------------------------
+pressure_poisson 		- solve pressure Poisson equations with direct backsolve.  Use this version for Poisson solvers.
+
+pressure_lines			- solve pressure equations using 8-way Gauss-Seidel influenced line integration.  The pressure_omni branches are better.
+
+pressure_omni			- solve pressure equations using Liu and Katz style omni-directional line integration from a virtual boundary.
+
+pressure_omni_periodic		- same as pressure_omni, but assuming velocity fields are periodic in time.
+
+
+
+
+
+Development branches, obsolete or not kept current against main branches
+------------------------------------------------------------------------
+pressure_solve_(ADI-SOR) 	- original approach, solve Pressure Poisson equation using alternate direction implicit algorithm with succesive over-relaxation.  Use pressure_poisson instead.
+
+pressure_direct			- part of conversion from ADI-SOR to backsolve.  Rolled back into pressure_poisson, use that instead.
+
+pressure_poisson_bc		- branch of pressure_poisson, trying to improve solution by looking at consistency of source terms between BC and inside domain.  Not up-to-date against pressure_poisson.
+
+pressure_lines_3d		- branch of pressure_lines featuring 8-way line integration on stacked planar 3-component velocity fields.  Not up-to-date against pressure_lines

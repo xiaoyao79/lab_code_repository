@@ -1,0 +1,248 @@
+% cDEV 2D-2C flow field reconstruction main file
+%
+% This file will serve to call all codes necessary to obtain 2D-2C flow
+% field reconstruction from a single image or an image stack
+%
+% Structures will be used in this file to easily organize and pass around
+% variables between files. Description for each structure is provided below
+%
+% Each function in the header will be given with ample description to
+% incdicate each operation
+%
+% v1 Completed 03/13/2016 by Brett Meyers
+
+clear; 
+close all; 
+clc;
+
+temp.funcdir = pwd;
+addpath(fullfile(temp.funcdir,'data_windowing'));
+addpath(fullfile(temp.funcdir,'discrete_difference'));
+addpath(fullfile(temp.funcdir,'doppler_region_unwrap'));
+addpath(fullfile(temp.funcdir,'grid_generation'));
+addpath(fullfile(temp.funcdir,'outlier_detection'));
+addpath(fullfile(temp.funcdir,'plotting'));
+addpath(fullfile(temp.funcdir,'POD'));
+addpath(fullfile(temp.funcdir,'velocity_interpolation'));
+addpath(fullfile(temp.funcdir,'velocity_reconstruction'));
+
+% Provide directory where data is stored (DICOM,PNG,TIFF,etc.)
+info.voldir  = '/Volumes/GERI/';
+info.basedir = fullfile(info.voldir,'AEThER_Lab_research','CDoppler_work',...
+    'MSU_2D_Doppler','2D color');
+
+% Search directory for image(s) to be evaluated
+info.imname  = dir(fullfile(info.basedir,'73*in*.png'));
+
+% Read image(s) to workspace
+for tt = 1:numel(info.imname)
+    data.imcdopp(:,:,:,tt) = imread(fullfile(info.basedir,...
+                info.imname(tt).name));
+end
+
+% Get image sequence size
+[info.s1,info.s2,info.s3,info.s4] = size(data.imcdopp);
+
+% Call Cartesian & Polar Grid Generator
+% Subfunction for defining the cartesian and polar grids to be used in
+% image analysis including (1) image unwrapping and (2) field
+% reconstruction
+[data] = cart_pol_grid_gen(data,info);
+
+% Call windowing operation to extract ventricle and color doppler region
+% Subfunction for generating bulk window and subregion windows, then apply
+% subregion window to limit the amount of necessary data for evaluation
+[data] = window_data(data,info);
+%%
+% Subfunction for (1) extracting color image information from the data
+% and (2) interpolating from color data to velocity values
+[data] = color_image_interp(data,info);
+
+% Dealias Image using region-based weighting
+for kk = 1:info.s4
+    [data.changemap(:,:,kk)] = dealias_colormap(data.velocity_map(:,:,kk),...
+        data.Vmin, data.Vmax, data.mapp);
+    figure(2000); imagesc(data.changemap(:,:,kk));
+    colormap(data.mapp); colorbar;
+    caxis([2*data.Vmin 2*data.Vmax]);
+    pause(5E-1);
+end
+
+% Call subfunction for unwrapping image on to rectilinear uniform grid for
+% rho-theta evaluation
+[data] = doppler_roi_unwrap(data,info);
+
+% Generate dynamic mask frames from grayscale unwrapped images
+% (This will serve as the evaluation initializer 
+data.imboundary   = ones([size(data.Gtform,1) size(data.Gtform,2)]);
+roiwindow   = CROIEditor((uint8(data.Gtform(:,:,:,1))));
+
+while isempty(roiwindow.labels)
+    addlistener(roiwindow,'MaskDefined',@your_roi_defined_callback);
+    drawnow
+end
+
+data.imboundary(roiwindow.labels==0) = 0;
+close('Analyzer - ROI Editor')
+
+%%
+% Generate Cartesian Grid based on unwrapped region dimensions
+[Xeval,Yeval] = meshgrid(linspace(1,size(data.Vtform,2),size(data.Vtform,2)),...
+    linspace(1,size(data.Vtform,1),size(data.Vtform,1)));
+
+% Use generated grids to compose staggered grids for interpolation of data
+Xint = Xeval-0.5;
+Yint = Yeval;
+
+% Generate grid for interpolation, reducing resolution (expedites
+% reconstruciton)
+gspace = 8;
+[xint,yint]  = meshgrid((gspace+min(Xint(:))):gspace*(Xint(2,2)-Xint(1,1)):max(Xint(:)),...
+        (gspace+min(Yint(:))):gspace*(Yint(2,2)-Yint(1,1)):max(Yint(:)));
+
+% Gaussian Filter Kernel standard deviation (diameter)
+sigma = 1;
+h1    = fspecial('gaussian',[2*ceil(2*sigma)+1 2*ceil(2*sigma)+1],sigma);
+
+for kk = 1:info.s4
+    temp.velmap =  interp2(Xeval,Yeval,data.Vtform(:,:,kk),Xint,Yint,'spline',0);
+    temp.mask   =  interp2(Xeval,Yeval,data.imboundary,Xint,Yint,'spline',0);
+    velmask = temp.velmap;
+    velmask(abs(velmask) > 1) = 1;
+    temp.velmap = medfilt2(temp.velmap,[3 3]);    
+%     temp.velmap = imfilter(temp.velmap,h1);
+    
+    data.vmap(:,:,kk)  = interp2(Xint,Yint,temp.velmap.*velmask,xint,yint);
+    data.bmask(:,:,kk) = interp2(Xint,Yint,temp.mask,xint,yint);
+end
+
+data.ytform = interp2(Xint,Yint,data.Ytform,xint,yint);
+data.xtform = interp2(Xint,Yint,data.Xtform,xint,yint);
+
+data.bmask(abs(data.bmask)>=0.5) = 2;
+data.bmask(abs(data.bmask)<0.5) = 0;
+
+% Generate Evaluation Mask (new feature in an attempt to speed up
+% processing time and improve results)
+% Step 1: Generate a mask that has levels for a) values outside the
+% boundary (bmask = 0), b) values along the boundary (bmask =1), and c)
+% values inside the boundary (bmask = 2)
+for i = 2:size(data.bmask,1)-1
+    for j = 2:size(data.bmask,2)-1
+        if data.bmask(i,j) == 2
+            if data.bmask(i-1,j) == 0 || data.bmask(i+1,j) == 0
+                data.bmask(i,j) = 1;
+            end
+        end
+    end
+end
+for i = 2:size(data.bmask,1)-1
+    for j = 2:size(data.bmask,2)-1
+        if data.bmask(i,j) == 2
+            if data.bmask(i,j-1) == 0 || data.bmask(i,j+1) == 0
+                data.bmask(i,j) = 1;
+            end
+        end
+    end
+end
+
+% This step generates the fourth level of the mask: points where the
+% velocity is not zero. In order to do this, the velocity field is taken
+% and any value less than the minimum resolution of the color scale is set
+% to zero, anything above to 1, to generate a new velocity mask. This mask
+% is then multiplied by the multilevel mask to ensure that points along the
+% boundary are not rescaled.
+temp.vmask = data.vmap;
+temp.vmask(abs(temp.vmask) < (data.Vmax-data.Vmin)/size(data.mapp,1)) = 0;
+temp.vmask(abs(temp.vmask) > (data.Vmax-data.Vmin)/size(data.mapp,1)) = 1;
+temp.vmask = temp.vmask.*data.bmask;
+temp.vmask(temp.vmask < 2) = 0;
+temp.vmask(temp.vmask ~=0) = 1;
+
+% Add the velocity level mask on to the boundary mask for use in cDEV
+% evaluation (I think this is a REALLY cool step that should produce REALLY
+% nice results)
+data.bmask = data.bmask + temp.vmask;
+
+info.recondir = 1;
+data.num_iter = 2000;
+
+% Run Color Doppler Reconstruction
+for kk = 1:info.s4
+    fprintf('Now evaluating velocity frame %3.0f \n',kk);
+    
+    if info.recondir == 1
+        data.rscale = data.ytform/100;
+        data.dr     = abs(data.rscale(2,2)-data.rscale(1,1));
+        data.dth    = abs(data.xtform(2,2)-data.xtform(1,1));
+        
+        ur = -data.vmap(:,:,kk)/100;
+        ut = 0*ur;
+    else
+        ut = velmap;
+        ur = zeros(size(ut));
+    end
+    
+    if min(data.bmask(:)) == 1
+        Omega = -2*(data.rscale.^-1).*socdiff(ur,data.dth,2);
+        Omega = laplace_outlier_detect(Omega,data.dth,data.dr,2);
+    else
+        temp.bmask = data.bmask;
+        temp.bmask(temp.bmask ~= 0) = 1;
+        Omega = -2*(data.rscale.^-1).*socdiff_bc(ur,data.dth,2,...
+            temp.bmask);
+        Omega = laplace_outlier_detect(Omega,data.dth,data.dr,2);
+    end
+    
+    [Ut,Ur,psi,omega] = psi_omega_solver_func_cylindrical(ut,...
+        ur,data.rscale,data.dr,data.dth,Omega,data.bmask,...
+        data.num_iter);
+end
+%%
+% Run Universal Outlier Detection to remove spurious vectors
+Eval = zeros([size(Ut,1) size(Ut,2)]);
+win = [3,2];
+tol = 1;
+[Utv,Urv,Eval] = UOD(Ut,Ur,win,tol,Eval);
+[UtE,UrE]      = vel_replace(Utv,Urv,Eval,win);
+
+sigma = 2;
+h1    = fspecial('gaussian',[2*ceil(2*sigma)+1 2*ceil(2*sigma)+1],sigma);
+
+temp.bmask = data.bmask;
+temp.bmask(temp.bmask ~=0) = 1;
+UtE = imfilter(UtE,h1).*temp.bmask;
+UrE = imfilter(UrE,h1).*temp.bmask;
+
+%%
+% Interpolate Velocity fields back on to original grid
+for tt = 1:info.s4
+    data.ut(:,:,tt) = interp2(data.xtform,...
+        data.ytform,UtE(:,:,tt),data.T,data.R);
+    data.ur(:,:,tt) = interp2(data.xtform,...
+        data.ytform,-UrE(:,:,tt),data.T,data.R);
+    
+    data.ux(:,:,tt) =   data.ur(:,:,tt).*cos(data.T) -...
+        data.ut(:,:,tt).*sin(data.T);
+    data.uy(:,:,tt) = (data.ur(:,:,tt).*sin(data.T) +...
+        data.ut(:,:,tt).*cos(data.T));
+end
+
+data.ut(isnan(data.ut)) = 0;
+data.ur(isnan(data.ur)) = 0;
+data.ux(isnan(data.ux)) = 0;
+data.uy(isnan(data.uy)) = 0;
+%%
+[Xgrid,Ygrid] = meshgrid(data.xstart:data.xend,linspace(data.yend,data.ystart,numel(data.ystart:data.yend)));
+
+gspace = 8;
+
+figure; 
+imshow(uint8(data.imgray(data.ystart:data.yend,data.xstart:data.xend,:)),...
+    'XData',data.xstart:data.xend,'YData',data.ystart:data.yend);
+hold on;
+quiverc(Xgrid(gspace:gspace:end,gspace:gspace:end),...
+    flipud(Ygrid(gspace:gspace:end,gspace:gspace:end)),...
+    -data.ux(gspace:gspace:end,gspace:gspace:end),...
+    -data.uy(gspace:gspace:end,gspace:gspace:end));
+hold off;

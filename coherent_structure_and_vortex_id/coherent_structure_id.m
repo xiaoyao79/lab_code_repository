@@ -60,7 +60,5 @@ end
 
 if strcmp(vortex_method,'LambdaCI')
     cal_mat = swirl./max(swirl(:)).*sign(vort);
-else
-    cal_mat = cal_mat.*sign(vort);
 end
 
